@@ -1,11 +1,20 @@
+// 1. Load environment variables first
+require("dotenv").config(); // Reads .env and adds variables to process.env
+
 const express = require("express");
 const { MongoClient, ServerApiVersion } = require("mongodb");
 
 const app = express();
 const port = 3000;
 
-const uri =
-  "mongodb+srv://freelio:QShKSGgzTww3kljJ@cluster0.hfwfyl0.mongodb.net/?appName=Cluster0";
+// 2. Read the URI from the environment variables (process.env)
+const uri = process.env.MONGODB_URI;
+
+// Check if URI is loaded (a good practice)
+if (!uri) {
+  console.error("❌ MONGODB_URI not found in environment variables. Check your .env file!");
+  process.exit(1);
+}
 
 const client = new MongoClient(uri, {
   serverApi: {
