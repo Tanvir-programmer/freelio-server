@@ -2,4 +2,4 @@
 # ... other ignores (like node_modules) ...
 
 # Ignore environment variables file
-.env
+.env.local
