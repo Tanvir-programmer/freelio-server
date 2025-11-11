@@ -12,3 +12,4 @@ node_modules/
 # Ignore logs and other temporary files
 npm-debug.log
 yarn-error.log
+.vercel
