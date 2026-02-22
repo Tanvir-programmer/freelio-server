@@ -32,11 +32,82 @@ async function connectToMongoDB() {
   isConnected = true;
   console.log("✅ MongoDB Connected!");
 }
+// Accept job route - MUST match frontend exactly
+// Accept job route - Updated to match frontend body request
+app.post("/acceptJob", async (req, res) => {
+  try {
+    const { jobId, userEmail } = req.body; // Extract from body, not params
 
-// Get all jobs
-app.get("/allJobs", async (req, res) => {
+    if (!ObjectId.isValid(jobId) || !userEmail) {
+      return res
+        .status(400)
+        .json({ message: "Valid Job ID and email are required" });
+    }
+
+    // 1. Check if job exists in the main collection
+    const originalJob = await jobsCollection.findOne({
+      _id: new ObjectId(jobId),
+    });
+    if (!originalJob) {
+      return res.status(404).json({ message: "Job not found" });
+    }
+
+    // 2. Prevent users from accepting their own jobs
+    if (originalJob.email === userEmail) {
+      return res
+        .status(400)
+        .json({ message: "You cannot accept your own job!" });
+    }
+
+    // 3. Check if already accepted by this user
+    const existing = await acceptedJobsCollection.findOne({
+      jobId: new ObjectId(jobId),
+      userEmail: userEmail,
+    });
+    if (existing) {
+      return res
+        .status(400)
+        .json({ message: "You have already accepted this job" });
+    }
+
+    // 4. Create accepted job record
+    const acceptedJob = {
+      jobId: new ObjectId(jobId),
+      userEmail: userEmail,
+      title: originalJob.title,
+      category: originalJob.category,
+      summary: originalJob.summary,
+      postedBy: originalJob.postedBy,
+      coverImage: originalJob.coverImage || "",
+      acceptedAt: new Date(),
+      status: "In Progress",
+    };
+
+    await acceptedJobsCollection.insertOne(acceptedJob);
+    res.json({ message: "✅ Job accepted successfully!" });
+  } catch (err) {
+    console.error("Accept job error:", err);
+    res.status(500).json({ message: "Failed to accept job" });
+  }
+});
+
+// Helper wrapper to ensure DB connected for each route
+async function ensureDb(req, res, next) {
   try {
     await connectToMongoDB();
+    next();
+  } catch (err) {
+    console.error("DB connection error:", err);
+    res.status(500).send({ message: "Database connection failed" });
+  }
+}
+
+// Use ensureDb as middleware for all routes
+app.use(ensureDb);
+
+// GET /allJobs - fetch all jobs
+app.get("/allJobs", async (req, res) => {
+  try {
     const jobs = await jobsCollection.find().toArray();
     res.send(jobs);
   } catch (err) {
@@ -45,13 +116,13 @@ app.get("/allJobs", async (req, res) => {
   }
 });
 
-// Get single job by ID
+// GET /allJobs/:id - fetch single job
 app.get("/allJobs/:id", async (req, res) => {
   try {
-    await connectToMongoDB();
-    const job = await jobsCollection.findOne({
-      _id: new ObjectId(req.params.id),
-    });
+    const id = req.params.id;
+    if (!ObjectId.isValid(id))
+      return res.status(400).send({ message: "Invalid job ID" });
+    const job = await jobsCollection.findOne({ _id: new ObjectId(id) });
     if (!job) return res.status(404).send({ message: "Job not found" });
     res.send(job);
   } catch (err) {
@@ -60,91 +131,140 @@ app.get("/allJobs/:id", async (req, res) => {
   }
 });
 
-// Post new job
+// POST /postJob - create new job
 app.post("/postJob", async (req, res) => {
   try {
-    await connectToMongoDB();
+    const body = req.body || {};
     const job = {
-      ...req.body,
-      coverImage: req.body.cover || "", // map frontend 'cover' to 'coverImage'
+      title: body.title || "",
+      category: body.category || "Others",
+      summary: body.summary || "",
+      coverImage: body.coverImage || body.cover || "",
+      postedBy: body.postedBy || body.postedBy || "",
+      email: body.email || "",
+      postedAt: body.postedAt ? new Date(body.postedAt) : new Date(),
+      // keep any additional fields
+      ...body,
     };
+
+    // remove duplicated fields if present in ...body
+    delete job.cover; // normalize
+
     const result = await jobsCollection.insertOne(job);
-    res.status(201).send(result);
+    res.status(201).send({ insertedId: result.insertedId });
   } catch (err) {
     console.error(err);
     res.status(500).send({ message: "Failed to add job." });
   }
 });
 
-// Accept a job
-// Server (Node.js/Express)
-app.post("/acceptJob", async (req, res) => {
+// PUT /updateJob/:id - update a job (only fields provided will be set)
+app.put("/updateJob/:id", async (req, res) => {
   try {
-    await connectToMongoDB();
-    const { jobId: jobIdString, userEmail, userName } = req.body; // Rename the incoming string ID // Convert the incoming string ID to an ObjectId
-    const jobObjectId = new ObjectId(jobIdString); // 1. Find the job in the main job collection using ObjectId
+    const id = req.params.id;
+    if (!ObjectId.isValid(id))
+      return res.status(400).send({ message: "Invalid job ID" });
 
-    const job = await jobsCollection.findOne({ _id: jobObjectId });
-    if (!job) return res.status(404).send({ message: "Job not found" }); // 2. Check if already accepted using the original job's _id (ObjectId)
+    const body = req.body || {};
+    const updatedFields = {
+      ...(body.title !== undefined && { title: body.title }),
+      ...(body.category !== undefined && { category: body.category }),
+      ...(body.summary !== undefined && { summary: body.summary }),
+      ...(body.coverImage !== undefined && { coverImage: body.coverImage }),
+      ...(body.postedAt !== undefined && { postedAt: new Date(body.postedAt) }),
+    };
 
-    const alreadyAccepted = await acceptedJobsCollection.findOne({
-      jobId: jobObjectId, // Check against the ObjectId
-      userEmail,
-    });
-    if (alreadyAccepted)
-      return res.status(400).send({ message: "Job already accepted" }); // 3. Insert the new accepted job record, storing the jobId as an ObjectId
-
-    await acceptedJobsCollection.insertOne({
-      jobId: jobObjectId, // Store as ObjectId for consistency
-      title: job.title,
-      category: job.category,
-      summary: job.summary,
-      cover: job.cover,
-      postedBy: job.postedBy,
-      userEmail,
-      userName,
-      acceptedAt: new Date(),
-    });
-
-    res.status(201).send({ message: "Job accepted successfully" });
-  } catch (err) {
-    console.error("Error accepting job:", err); // Handle potential invalid ObjectId format error here
-    if (err.message && err.message.includes("ObjectId")) {
-      return res.status(400).send({ message: "Invalid job ID format." });
+    if (Object.keys(updatedFields).length === 0) {
+      return res.status(400).send({ message: "No valid fields to update" });
     }
-    res.status(500).send({ message: "Failed to accept job" });
-  }
-});
 
-app.get("/latestjobs", async (req, res) => {
-  try {
-    await connectToMongoDB();
-    const jobs = await jobsCollection
-      .find()
-      .sort({ postedAt: -1 }) // newest first
-      .limit(6)
-      .toArray();
-    res.send(jobs);
+    const filter = { _id: new ObjectId(id) };
+    const updateDoc = { $set: updatedFields };
+    const result = await jobsCollection.updateOne(filter, updateDoc);
+    res.send({
+      matchedCount: result.matchedCount,
+      modifiedCount: result.modifiedCount,
+    });
   } catch (err) {
     console.error(err);
-    res.status(500).send({ message: "Failed to fetch latest jobs" });
+    res.status(500).send({ message: "Failed to update job" });
   }
 });
-// Cancel accepted job (already exists in your code)
-app.patch("/accepted-job/:id", async (req, res) => {
+
+// DELETE /deleteJob/:id - delete a job
+app.delete("/deleteJob/:id", async (req, res) => {
   try {
-    await connectToMongoDB();
+    const id = req.params.id;
+    if (!ObjectId.isValid(id))
+      return res.status(400).send({ message: "Invalid job ID" });
+    const result = await jobsCollection.deleteOne({ _id: new ObjectId(id) });
+    if (result.deletedCount === 0)
+      return res.status(404).send({ message: "Job not found" });
+    res.send({ message: "Job deleted" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send({ message: "Failed to delete job" });
+  }
+});
+
+// GET /accepted-jobs?email=user@example.com
+app.get("/accepted-jobs", async (req, res) => {
+  try {
+    const email = req.query.email;
+    if (!email) return res.status(400).send({ message: "Email is required" });
+
+    const jobs = await acceptedJobsCollection
+      .find({ userEmail: email })
+      .toArray();
+
+    // Convert _id to string for frontend
+    const jobsWithId = jobs.map((job) => ({ ...job, _id: job._id.toString() }));
+
+    res.send(jobsWithId);
+  } catch (err) {
+    console.error(err);
+    res.status(500).send({ message: "Failed to fetch accepted jobs" });
+  }
+});
+// PATCH /accepted-job-done/:id
+app.patch("/accepted-job-done/:id", async (req, res) => {
+  try {
     const { id } = req.params;
     const { email } = req.body;
+
+    if (!ObjectId.isValid(id))
+      return res.status(400).send({ message: "Invalid job ID" });
 
     const result = await acceptedJobsCollection.deleteOne({
       _id: new ObjectId(id),
       userEmail: email,
     });
 
-    if (result.deletedCount === 0) {
-      return res.status(404).send({ message: "Job not found or cannot be deleted" });
-    }
+    if (result.deletedCount === 0)
+      return res.status(404).send({ message: "Job not found" });
+
+    res.send({ message: "Job marked as DONE and removed" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send({ message: "Failed to mark job as DONE" });
+  }
+});
+// PATCH /accepted-job/:id
+app.patch("/accepted-job/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { email } = req.body;
+
+    if (!ObjectId.isValid(id))
+      return res.status(400).send({ message: "Invalid job ID" });
+
+    const result = await acceptedJobsCollection.deleteOne({
+      _id: new ObjectId(id),
+      userEmail: email,
+    });
+
+    if (result.deletedCount === 0)
+      return res.status(404).send({ message: "Job not found" });
 
     res.send({ message: "Job cancelled successfully" });
   } catch (err) {
@@ -153,23 +273,60 @@ app.patch("/accepted-job/:id", async (req, res) => {
   }
 });
 
-// Mark accepted job as DONE
-app.patch("/accepted-job-done/:id", async (req, res) => {
+// GET /latestjobs - latest N jobs (default 6)
+app.get("/latestjobs", async (req, res) => {
   try {
-    await connectToMongoDB();
-    const { id } = req.params;
-    const { email } = req.body;
+    const limit = parseInt(req.query.limit) || 6;
+    const jobs = await jobsCollection
+      .find()
+      .sort({ postedAt: -1 })
+      .limit(limit)
+      .toArray();
+    res.send(jobs);
+  } catch (err) {
+    console.error(err);
+    res.status(500).send({ message: "Failed to fetch latest jobs" });
+  }
+});
 
-    // Option 1: Delete after DONE (like CANCEL) or Option 2: Add a status field
+// Accepted jobs - cancel / mark done (examples keep using userEmail for safety)
+app.patch("/accepted-job/:id", async (req, res) => {
+  try {
+    const id = req.params.id;
+    const { email } = req.body || {};
+    if (!ObjectId.isValid(id))
+      return res.status(400).send({ message: "Invalid ID" });
+
     const result = await acceptedJobsCollection.deleteOne({
       _id: new ObjectId(id),
       userEmail: email,
     });
+    if (result.deletedCount === 0)
+      return res
+        .status(404)
+        .send({ message: "Accepted job not found or cannot be deleted" });
+    res.send({ message: "Job cancelled successfully" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send({ message: "Failed to cancel job" });
+  }
+});
 
-    if (result.deletedCount === 0) {
-      return res.status(404).send({ message: "Job not found or cannot be marked as done" });
-    }
+app.patch("/accepted-job-done/:id", async (req, res) => {
+  try {
+    const id = req.params.id;
+    const { email } = req.body || {};
+    if (!ObjectId.isValid(id))
+      return res.status(400).send({ message: "Invalid ID" });
 
+    const result = await acceptedJobsCollection.deleteOne({
+      _id: new ObjectId(id),
+      userEmail: email,
+    });
+    if (result.deletedCount === 0)
+      return res
+        .status(404)
+        .send({ message: "Accepted job not found or cannot be updated" });
     res.send({ message: "Job marked as DONE successfully" });
   } catch (err) {
     console.error(err);
@@ -179,19 +336,17 @@ app.patch("/accepted-job-done/:id", async (req, res) => {
 
 app.delete("/accepted-job/:id", async (req, res) => {
   try {
-    await connectToMongoDB();
-    const jobObjectId = new ObjectId(req.params.id);
-    const { email } = req.body;
+    const jobObjectId = req.params.id;
+    const { email } = req.body || {};
+    if (!ObjectId.isValid(jobObjectId))
+      return res.status(400).send({ message: "Invalid ID" });
 
     const result = await acceptedJobsCollection.deleteOne({
-      jobId: jobObjectId,
+      jobId: new ObjectId(jobObjectId),
       userEmail: email,
     });
-
-    if (result.deletedCount === 0) {
+    if (result.deletedCount === 0)
       return res.status(404).send({ message: "Accepted job not found" });
-    }
-
     res.send({ message: "Accepted job deleted permanently" });
   } catch (err) {
     console.error(err);
@@ -199,6 +354,14 @@ app.delete("/accepted-job/:id", async (req, res) => {
   }
 });
 
-app.listen(port, () => {
-  console.log(`🚀 Server running on port ${port}`);
-});
+// Start server after connecting to DB to avoid race conditions
+connectToMongoDB()
+  .then(() => {
+    app.listen(port, () => {
+      console.log(`🚀 Server running on port ${port}`);
+    });
+  })
+  .catch((err) => {
+    console.error("Failed to start server:", err);
+    process.exit(1);
+  });
